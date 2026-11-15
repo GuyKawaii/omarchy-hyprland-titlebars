@@ -181,13 +181,59 @@ end
 
     original = client()
 
+    ctl('eval', 'hl.config({ plugin = { hyprbars = { edge_snap = false } } })')
     edge = drag_to(1, 360)
     assert edge['size'] == original['size'] and edge['fullscreen'] == 0, edge
     top = drag_to(650, 1)
     assert top['size'] == original['size'] and top['fullscreen'] == 0, top
     # Dropped with its titlebar above the top edge, the window comes back down.
     assert top['at'][1] >= 32, top
-    print('PASS: real pointer titlebar drags move the window to any edge without snapping and keep its titlebar on screen', flush=True)
+    print('PASS: with edge_snap off, titlebar drags move the window to any edge without snapping and keep its titlebar on screen', flush=True)
+
+    # Edge snapping, on by default: let go at an edge for that half, in a
+    # corner for that quarter, at the top for the whole work area. Dragging a
+    # snapped window out gives back its own size.
+    ctl('eval', 'hl.config({ plugin = { hyprbars = { edge_snap = true } } })')
+    drag_to(640, 400)
+    time.sleep(.3)
+    original = client()
+    width, height = 1280, 800
+
+    def settled():
+      time.sleep(.6)
+      return client()
+
+    drag_to(1, 400)
+    left = settled()
+    assert left['at'][0] < 40 and width * .4 < left['size'][0] < width * .5 and left['size'][1] > height * .8, left
+    capture('snap-left')
+    drag_to(width - 1, 400)
+    right = settled()
+    assert right['at'][0] > width * .5 and right['size'] == left['size'], right
+    drag_to(1, 1)
+    corner = settled()
+    assert corner['at'][0] < 40 and width * .4 < corner['size'][0] < width * .5 and height * .35 < corner['size'][1] < height * .5, corner
+    capture('snap-top-left')
+    drag_to(width - 1, height - 1)
+    lower = settled()
+    assert lower['at'][0] > width * .5 and lower['at'][1] > height * .5 and lower['size'] == corner['size'], lower
+    drag_to(640, 1)
+    whole = settled()
+    assert whole['size'][0] > width * .9 and whole['size'][1] > height * .8 and whole['fullscreen'] == 0, whole
+    capture('snap-top')
+    print('PASS: titlebar drags snap to halves, quarters and the whole work area', flush=True)
+
+    out = drag_to(640, 300)
+    time.sleep(.3)
+    out = client()
+    assert out['size'] == original['size'], (original, out)
+    print('PASS: dragging a snapped window out gives back its own size', flush=True)
+
+    drag_to(640, 400)
+    time.sleep(.3)
+    assert client()['size'] == original['size'], client()
+    print('PASS: a drop away from the edges does not snap', flush=True)
+    original = client()
 
     window = client()
     x, y = window['at'][0] + 120, window['at'][1] - 15

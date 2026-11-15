@@ -28,6 +28,8 @@
 #include "BarPassElement.hpp"
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include "appName.hpp"
+#include <hyprland/src/render/pass/RectPassElement.hpp>
+#include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
 
 #include <algorithm>
 #include <climits>
@@ -176,6 +178,9 @@ void COmarchyFloatingHyprBar::onMouseMove(Vector2D coords) {
   // them, also with hardware cursors.
   damageOnButtonHover();
 
+  if (m_bDraggingThis && !m_bTouchEv)
+    updateSnap();
+
   if (!m_bDragPending || m_bTouchEv || !validMapped(m_pWindow) || m_touchId != 0)
     return;
 
@@ -315,12 +320,16 @@ void COmarchyFloatingHyprBar::handleUpEvent(Event::SCallbackInfo &info) {
     m_bDraggingThis = false;
     if (m_bTouchEv)
       (void)Config::Actions::floatWindow(Config::Actions::eTogglableAction::TOGGLE_ACTION_DISABLE);
+    else if (MOVING && m_snapZone != SNAP_NONE)
+      // After the drag has ended, or ending it would put the window back.
+      applySnap();
     else if (MOVING)
       keepTitlebarReachable();
 
     LOG(Log::DEBUG, "[hyprbars] Dragging ended on {:x}", (uintptr_t)m_pWindow.lock().get());
   }
 
+  clearSnap();
   m_bDragPending = false;
   m_bTouchEv = false;
   m_touchId = 0;
@@ -335,6 +344,9 @@ void COmarchyFloatingHyprBar::handleMovement() {
   const bool maximized = Fullscreen::controller()->isFullscreen(window, Fullscreen::FSMODE_MAXIMIZED);
   if (maximized)
     Fullscreen::controller()->setFullscreenMode(window, Fullscreen::FSMODE_NONE);
+
+  if (!maximized)
+    restoreSnappedSize(cursor, anchor, offset);
 
   if (maximized) {
     auto box = window->layoutTarget()->position();
@@ -394,6 +406,158 @@ bool COmarchyFloatingHyprBar::doButtonPress(Config::INTEGER barPadding, Config::
     offset += barButtonPadding + b.size;
   }
   return false;
+}
+
+// ---- Edge snapping ----------------------------------------------------------
+// The pointer has to reach the screen's edge (it stops there), and a corner
+// reaches CORNER of the side along each edge, so a corner is easy to hit.
+static constexpr double SNAP_EDGE = 2.0;
+static constexpr double SNAP_CORNER = 0.2;
+
+void COmarchyFloatingHyprBar::updateSnap() {
+  const auto window = m_pWindow.lock();
+  const auto monitor = Desktop::focusState()->monitor();
+  if (!g_pOmarchyFloatingGlobalState->config.edgeSnap->value() || !window || !window->isFloating() || !monitor) {
+    clearSnap();
+    return;
+  }
+
+  const auto cursor = g_pInputManager->getMouseCoordsInternal();
+  const auto screen = monitor->logicalBox();
+  const bool left = cursor.x <= screen.x + SNAP_EDGE;
+  const bool right = cursor.x >= screen.x + screen.w - 1 - SNAP_EDGE;
+  const bool top = cursor.y <= screen.y + SNAP_EDGE;
+  const bool bottom = cursor.y >= screen.y + screen.h - 1 - SNAP_EDGE;
+  const bool upper = cursor.y < screen.y + screen.h * SNAP_CORNER;
+  const bool lower = cursor.y > screen.y + screen.h * (1 - SNAP_CORNER);
+  const bool west = cursor.x < screen.x + screen.w * SNAP_CORNER;
+  const bool east = cursor.x > screen.x + screen.w * (1 - SNAP_CORNER);
+
+  eSnapZone zone = SNAP_NONE;
+  if ((left && upper) || (top && west))
+    zone = SNAP_TOP_LEFT;
+  else if ((right && upper) || (top && east))
+    zone = SNAP_TOP_RIGHT;
+  else if ((left && lower) || (bottom && west))
+    zone = SNAP_BOTTOM_LEFT;
+  else if ((right && lower) || (bottom && east))
+    zone = SNAP_BOTTOM_RIGHT;
+  else if (left)
+    zone = SNAP_LEFT;
+  else if (right)
+    zone = SNAP_RIGHT;
+  else if (top)
+    zone = SNAP_TOP;
+
+  if (zone == m_snapZone && monitor == m_snapMonitor.lock())
+    return;
+
+  if (m_snapZone != SNAP_NONE)
+    g_pHyprRenderer->damageBox(CBox{m_snapPreview}.expand(2));
+
+  m_snapZone = zone;
+  m_snapMonitor = monitor;
+  if (zone == SNAP_NONE)
+    return;
+
+  // Laid out as tiling would: gaps_out to the work area, gaps_in between halves.
+  static auto PGAPSIN = CConfigValue<Config::IComplexConfigValue>("general:gaps_in");
+  static auto PGAPSOUT = CConfigValue<Config::IComplexConfigValue>("general:gaps_out");
+  const auto *GAPSIN = sc<Config::CCssGapData *>(PGAPSIN.ptr());
+  const auto *GAPSOUT = sc<Config::CCssGapData *>(PGAPSOUT.ptr());
+
+  const auto area = monitor->logicalBoxMinusReserved();
+  double l = area.x + GAPSOUT->m_left, t = area.y + GAPSOUT->m_top;
+  double r = area.x + area.w - GAPSOUT->m_right, b = area.y + area.h - GAPSOUT->m_bottom;
+  const double MIDX = area.x + area.w / 2, MIDY = area.y + area.h / 2;
+
+  if (zone == SNAP_LEFT || zone == SNAP_TOP_LEFT || zone == SNAP_BOTTOM_LEFT)
+    r = MIDX - GAPSIN->m_right;
+  if (zone == SNAP_RIGHT || zone == SNAP_TOP_RIGHT || zone == SNAP_BOTTOM_RIGHT)
+    l = MIDX + GAPSIN->m_left;
+  if (zone == SNAP_TOP_LEFT || zone == SNAP_TOP_RIGHT)
+    b = MIDY - GAPSIN->m_bottom;
+  if (zone == SNAP_BOTTOM_LEFT || zone == SNAP_BOTTOM_RIGHT)
+    t = MIDY + GAPSIN->m_top;
+
+  m_snapPreview = CBox{l, t, r - l, b - t}.round();
+
+  // The window box sits inside its border and below this titlebar.
+  const double BORDER = window->presentation().borderSize();
+  const auto RESERVED = window->getFullWindowReservedArea();
+  m_snapTarget = CBox{l + BORDER + RESERVED.topLeft.x, t + BORDER + RESERVED.topLeft.y,
+                      r - l - 2 * BORDER - RESERVED.topLeft.x - RESERVED.bottomRight.x,
+                      b - t - 2 * BORDER - RESERVED.topLeft.y - RESERVED.bottomRight.y}
+                     .round();
+
+  g_pHyprRenderer->damageBox(CBox{m_snapPreview}.expand(2));
+}
+
+void COmarchyFloatingHyprBar::clearSnap() {
+  if (m_snapZone != SNAP_NONE)
+    g_pHyprRenderer->damageBox(CBox{m_snapPreview}.expand(2));
+  m_snapZone = SNAP_NONE;
+  m_snapMonitor.reset();
+}
+
+void COmarchyFloatingHyprBar::applySnap() {
+  const auto window = m_pWindow.lock();
+  if (m_snapZone == SNAP_NONE || !window || !window->isFloating() || m_snapTarget.w < 1 || m_snapTarget.h < 1)
+    return;
+
+  // Keep the size from before the first snap, so moving between zones and then
+  // out again gives back the window's own size.
+  if (!m_preSnapSize)
+    m_preSnapSize = window->layoutTarget()->position().size();
+
+  g_layoutManager->setTargetGeom(m_snapTarget, window->layoutTarget());
+  m_snappedBox = m_snapTarget;
+}
+
+void COmarchyFloatingHyprBar::restoreSnappedSize(const Vector2D &cursor, double anchor, double offset) {
+  const auto window = m_pWindow.lock();
+  if (!m_preSnapSize || !window)
+    return;
+
+  const auto size = *m_preSnapSize;
+  m_preSnapSize.reset();
+
+  // Resized or moved some other way since the snap: it is the window's own size now.
+  auto box = window->layoutTarget()->position();
+  if (box.round() != m_snappedBox)
+    return;
+
+  // Back to its own size under the pointer, holding the titlebar where it was
+  // grabbed, as a maximized window does.
+  const auto reserved = window->getFullWindowReservedArea();
+  box.w = size.x;
+  box.h = size.y;
+  box.x = cursor.x - box.w * anchor;
+  box.y = cursor.y + reserved.topLeft.y - offset;
+  g_layoutManager->setTargetGeom(box, window->layoutTarget());
+  window->layoutTarget()->warpPositionSize();
+}
+
+void COmarchyFloatingHyprBar::drawSnapPreview(Render::CRenderContext &ctx, PHLMONITOR pMonitor, float a) {
+  if (m_snapZone == SNAP_NONE || !m_bDraggingThis || pMonitor != m_snapMonitor.lock())
+    return;
+
+  const auto window = m_pWindow.lock();
+  const auto box = CBox{m_snapPreview}.translate(-pMonitor->m_position).scale(pMonitor->m_scale).round();
+  const int ROUNDING = window->presentation().rounding() * pMonitor->m_scale;
+
+  // A faint wash in the window's border colour where it will land.
+  static auto PACTIVEBORDER = CConfigValue<Config::IComplexConfigValue>("general:col.active_border");
+  const auto *GRAD = sc<Config::CGradientValueData *>(PACTIVEBORDER.ptr());
+  CHyprColor wash = GRAD->m_colors.empty() ? CHyprColor{1, 1, 1, 1} : GRAD->m_colors.front();
+  wash.a = 0.2F * a;
+
+  CRectPassElement::SRectData rect;
+  rect.box = box;
+  rect.color = wash;
+  rect.round = ROUNDING;
+  rect.roundingPower = window->presentation().roundingPower();
+  Render::IHyprRenderer::addPassElement(ctx, makeUnique<CRectPassElement>(rect));
 }
 
 void COmarchyFloatingHyprBar::renderBarTitle(const Vector2D &bufferSize, const float scale) {
@@ -570,6 +734,9 @@ void COmarchyFloatingHyprBar::draw(Render::CRenderContext &ctx, PHLMONITOR pMoni
 
   if (!PWINDOW->m_ruleApplicator->decorate().valueOrDefault())
     return;
+
+  // Under the window, over everything below it: the dragged window was raised.
+  drawSnapPreview(ctx, pMonitor, a);
 
   auto data = COmarchyFloatingBarPassElement::SBarData{this, a};
   Render::IHyprRenderer::addPassElement(ctx, makeUnique<COmarchyFloatingBarPassElement>(data));

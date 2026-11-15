@@ -122,6 +122,35 @@ private:
   // for dynamic updates
   int m_iLastHeight = 0;
 
+  // Edge snapping: a titlebar drag let go with the pointer at a screen edge
+  // fills that half, a corner that quarter, the top edge the whole work area.
+  enum eSnapZone : uint8_t {
+    SNAP_NONE,
+    SNAP_LEFT,
+    SNAP_RIGHT,
+    SNAP_TOP,
+    SNAP_TOP_LEFT,
+    SNAP_TOP_RIGHT,
+    SNAP_BOTTOM_LEFT,
+    SNAP_BOTTOM_RIGHT,
+  };
+  eSnapZone m_snapZone = SNAP_NONE;
+  PHLMONITORREF m_snapMonitor;
+  // Global logical boxes: the whole window as drawn in the zone (the preview),
+  // and the window box it gets on release.
+  CBox m_snapPreview;
+  CBox m_snapTarget;
+  // The size before the last snap, given back when the window is dragged out of
+  // the box it was snapped to.
+  std::optional<Vector2D> m_preSnapSize;
+  CBox m_snappedBox;
+
+  void updateSnap();
+  void clearSnap();
+  void applySnap();
+  void restoreSnappedSize(const Vector2D &cursor, double anchor, double offset);
+  void drawSnapPreview(Render::CRenderContext &ctx, PHLMONITOR pMonitor, float a);
+
   size_t getVisibleButtonCount(Config::INTEGER barButtonPadding, Config::INTEGER barPadding, const Vector2D &bufferSize, const float scale);
 
   friend class COmarchyFloatingBarPassElement;
