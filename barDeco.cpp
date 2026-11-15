@@ -345,8 +345,13 @@ void COmarchyFloatingHyprBar::handleMovement() {
   if (maximized)
     Fullscreen::controller()->setFullscreenMode(window, Fullscreen::FSMODE_NONE);
 
+  // Where the drag comes from: the tile it leaves (for a trade on release) and
+  // its own box, given back after a later snap. A snapped window gets its own
+  // size back under the pointer first.
+  m_dragFromZone = maximized ? SNAP_NONE : snappedZone();
   if (!maximized)
     restoreSnappedSize(cursor, anchor, offset);
+  m_dragFromBox = window->layoutTarget()->position();
 
   if (maximized) {
     auto box = window->layoutTarget()->position();
@@ -414,6 +419,41 @@ bool COmarchyFloatingHyprBar::doButtonPress(Config::INTEGER barPadding, Config::
 static constexpr double SNAP_EDGE = 2.0;
 static constexpr double SNAP_CORNER = 0.2;
 
+// The boxes a zone gives this window on a monitor: the whole window as drawn
+// (preview) and the window box itself (target). Laid out as tiling would:
+// gaps_out to the work area, gaps_in between halves, the window box inside its
+// border and below this titlebar.
+void COmarchyFloatingHyprBar::zoneBoxes(eSnapZone zone, PHLMONITOR monitor, CBox &preview, CBox &target) {
+  const auto window = m_pWindow.lock();
+  static auto PGAPSIN = CConfigValue<Config::IComplexConfigValue>("general:gaps_in");
+  static auto PGAPSOUT = CConfigValue<Config::IComplexConfigValue>("general:gaps_out");
+  const auto *GAPSIN = sc<Config::CCssGapData *>(PGAPSIN.ptr());
+  const auto *GAPSOUT = sc<Config::CCssGapData *>(PGAPSOUT.ptr());
+
+  const auto area = monitor->logicalBoxMinusReserved();
+  double l = area.x + GAPSOUT->m_left, t = area.y + GAPSOUT->m_top;
+  double r = area.x + area.w - GAPSOUT->m_right, b = area.y + area.h - GAPSOUT->m_bottom;
+  const double MIDX = area.x + area.w / 2, MIDY = area.y + area.h / 2;
+
+  if (zone == SNAP_LEFT || zone == SNAP_TOP_LEFT || zone == SNAP_BOTTOM_LEFT)
+    r = MIDX - GAPSIN->m_right;
+  if (zone == SNAP_RIGHT || zone == SNAP_TOP_RIGHT || zone == SNAP_BOTTOM_RIGHT)
+    l = MIDX + GAPSIN->m_left;
+  if (zone == SNAP_TOP_LEFT || zone == SNAP_TOP_RIGHT)
+    b = MIDY - GAPSIN->m_bottom;
+  if (zone == SNAP_BOTTOM_LEFT || zone == SNAP_BOTTOM_RIGHT)
+    t = MIDY + GAPSIN->m_top;
+
+  preview = CBox{l, t, r - l, b - t}.round();
+
+  const double BORDER = window->presentation().borderSize();
+  const auto RESERVED = window->getFullWindowReservedArea();
+  target = CBox{l + BORDER + RESERVED.topLeft.x, t + BORDER + RESERVED.topLeft.y,
+                r - l - 2 * BORDER - RESERVED.topLeft.x - RESERVED.bottomRight.x,
+                b - t - 2 * BORDER - RESERVED.topLeft.y - RESERVED.bottomRight.y}
+               .round();
+}
+
 void COmarchyFloatingHyprBar::updateSnap() {
   const auto window = m_pWindow.lock();
   const auto monitor = Desktop::focusState()->monitor();
@@ -460,35 +500,7 @@ void COmarchyFloatingHyprBar::updateSnap() {
   if (zone == SNAP_NONE)
     return;
 
-  // Laid out as tiling would: gaps_out to the work area, gaps_in between halves.
-  static auto PGAPSIN = CConfigValue<Config::IComplexConfigValue>("general:gaps_in");
-  static auto PGAPSOUT = CConfigValue<Config::IComplexConfigValue>("general:gaps_out");
-  const auto *GAPSIN = sc<Config::CCssGapData *>(PGAPSIN.ptr());
-  const auto *GAPSOUT = sc<Config::CCssGapData *>(PGAPSOUT.ptr());
-
-  const auto area = monitor->logicalBoxMinusReserved();
-  double l = area.x + GAPSOUT->m_left, t = area.y + GAPSOUT->m_top;
-  double r = area.x + area.w - GAPSOUT->m_right, b = area.y + area.h - GAPSOUT->m_bottom;
-  const double MIDX = area.x + area.w / 2, MIDY = area.y + area.h / 2;
-
-  if (zone == SNAP_LEFT || zone == SNAP_TOP_LEFT || zone == SNAP_BOTTOM_LEFT)
-    r = MIDX - GAPSIN->m_right;
-  if (zone == SNAP_RIGHT || zone == SNAP_TOP_RIGHT || zone == SNAP_BOTTOM_RIGHT)
-    l = MIDX + GAPSIN->m_left;
-  if (zone == SNAP_TOP_LEFT || zone == SNAP_TOP_RIGHT)
-    b = MIDY - GAPSIN->m_bottom;
-  if (zone == SNAP_BOTTOM_LEFT || zone == SNAP_BOTTOM_RIGHT)
-    t = MIDY + GAPSIN->m_top;
-
-  m_snapPreview = CBox{l, t, r - l, b - t}.round();
-
-  // The window box sits inside its border and below this titlebar.
-  const double BORDER = window->presentation().borderSize();
-  const auto RESERVED = window->getFullWindowReservedArea();
-  m_snapTarget = CBox{l + BORDER + RESERVED.topLeft.x, t + BORDER + RESERVED.topLeft.y,
-                      r - l - 2 * BORDER - RESERVED.topLeft.x - RESERVED.bottomRight.x,
-                      b - t - 2 * BORDER - RESERVED.topLeft.y - RESERVED.bottomRight.y}
-                     .round();
+  zoneBoxes(zone, monitor, m_snapPreview, m_snapTarget);
 
   g_pHyprRenderer->damageBox(CBox{m_snapPreview}.expand(2));
 }
@@ -505,27 +517,168 @@ void COmarchyFloatingHyprBar::applySnap() {
   if (m_snapZone == SNAP_NONE || !window || !window->isFloating() || m_snapTarget.w < 1 || m_snapTarget.h < 1)
     return;
 
-  // Keep the size from before the first snap, so moving between zones and then
-  // out again gives back the window's own size.
-  if (!m_preSnapSize)
-    m_preSnapSize = window->layoutTarget()->position().size();
-
+  if (const auto monitor = m_snapMonitor.lock())
+    makeRoom(m_snapZone, m_dragFromZone, monitor);
+  // The window's own box is the one from before the drag, not the one it was
+  // dropped with, which hangs off the screen edge under the pointer.
+  m_preSnapBox = m_dragFromBox;
   g_layoutManager->setTargetGeom(m_snapTarget, window->layoutTarget());
-  m_snappedBox = m_snapTarget;
+}
+
+// The tile the window sits in, worked out from its box (within a couple of
+// pixels), or SNAP_NONE. Nothing else is remembered, so this survives reloads,
+// and a window moved or resized some other way simply isn't snapped any more.
+COmarchyFloatingHyprBar::eSnapZone COmarchyFloatingHyprBar::snappedZone() {
+  const auto window = m_pWindow.lock();
+  const auto monitor = window ? window->m_monitor.lock() : nullptr;
+  if (!validMapped(window) || !window->isFloating() || !monitor)
+    return SNAP_NONE;
+
+  const auto box = window->layoutTarget()->position();
+  for (const auto zone : {SNAP_LEFT, SNAP_RIGHT, SNAP_TOP, SNAP_TOP_LEFT, SNAP_TOP_RIGHT, SNAP_BOTTOM_LEFT, SNAP_BOTTOM_RIGHT}) {
+    CBox preview, target;
+    zoneBoxes(zone, monitor, preview, target);
+    if (std::abs(box.x - target.x) <= 2 && std::abs(box.y - target.y) <= 2 && std::abs(box.w - target.w) <= 2 && std::abs(box.h - target.h) <= 2)
+      return zone;
+  }
+  return SNAP_NONE;
+}
+
+void COmarchyFloatingHyprBar::snapTo(eSnapZone zone, const CBox &target) {
+  const auto window = m_pWindow.lock();
+  // Keep the box from before the first snap, so moving between zones and then
+  // out again gives back the window's own size (and, by key, its place).
+  if (snappedZone() == SNAP_NONE)
+    m_preSnapBox = window->layoutTarget()->position();
+  g_layoutManager->setTargetGeom(target, window->layoutTarget());
+}
+
+// The window's own box, kept inside the work area of the monitor it is on now.
+// Without one (the plugin was reloaded since the snap), Omarchy's size for a
+// newly floated window, centred.
+CBox COmarchyFloatingHyprBar::ownBox(PHLMONITOR monitor) {
+  const auto area = monitor->logicalBoxMinusReserved();
+  CBox box = m_preSnapBox.value_or(CBox{0, 0, std::min(1100.0, area.w * 0.64), std::min(760.0, area.h * 0.68)});
+  box.w = std::min(box.w, area.w);
+  box.h = std::min(box.h, area.h);
+  if (!m_preSnapBox) {
+    box.x = area.x + (area.w - box.w) / 2;
+    box.y = area.y + (area.h - box.h) / 2;
+  }
+  box.x = std::clamp(box.x, area.x, area.x + area.w - box.w);
+  box.y = std::clamp(box.y, area.y, area.y + area.h - box.h);
+  return box;
+}
+
+void COmarchyFloatingHyprBar::restoreSnapped() {
+  const auto window = m_pWindow.lock();
+  const auto monitor = window ? window->m_monitor.lock() : nullptr;
+  if (!window || !monitor)
+    return;
+  g_layoutManager->setTargetGeom(ownBox(monitor), window->layoutTarget());
+  m_preSnapBox.reset();
+}
+
+// Before this window takes `zone`, move the snapped windows in its way on the
+// same workspace: one in that very tile trades places with it (when it comes
+// from a tile of its own), as a swap does; one holding the half a quarter is cut
+// from keeps the other quarter of that half, so the two share it.
+void COmarchyFloatingHyprBar::makeRoom(eSnapZone zone, eSnapZone from, PHLMONITOR monitor) {
+  const auto window = m_pWindow.lock();
+  auto halfOf = [](eSnapZone z) {
+    if (z == SNAP_TOP_LEFT || z == SNAP_BOTTOM_LEFT)
+      return SNAP_LEFT;
+    if (z == SNAP_TOP_RIGHT || z == SNAP_BOTTOM_RIGHT)
+      return SNAP_RIGHT;
+    return SNAP_NONE;
+  };
+  auto otherQuarter = [](eSnapZone z) {
+    switch (z) {
+      case SNAP_TOP_LEFT: return SNAP_BOTTOM_LEFT;
+      case SNAP_BOTTOM_LEFT: return SNAP_TOP_LEFT;
+      case SNAP_TOP_RIGHT: return SNAP_BOTTOM_RIGHT;
+      case SNAP_BOTTOM_RIGHT: return SNAP_TOP_RIGHT;
+      default: return SNAP_NONE;
+    }
+  };
+
+  // Decorations own their bars, so these weak pointers are only read, never locked.
+  for (const auto &weak : g_pOmarchyFloatingGlobalState->bars) {
+    const auto other = weak.get();
+    if (!other || other == this)
+      continue;
+    const auto otherWindow = other->getOwner();
+    if (!validMapped(otherWindow) || otherWindow->m_workspace != window->m_workspace)
+      continue;
+
+    const auto held = other->snappedZone();
+    eSnapZone moveTo = SNAP_NONE;
+    if (held == zone && from != SNAP_NONE)
+      moveTo = from;
+    else if (held != SNAP_NONE && held == halfOf(zone))
+      moveTo = otherQuarter(zone);
+    if (moveTo == SNAP_NONE)
+      continue;
+
+    CBox preview, target;
+    other->zoneBoxes(moveTo, monitor, preview, target);
+    other->snapTo(moveTo, target);
+  }
+}
+
+// Super + Shift + arrow on a floating workspace: move the window one step that
+// way between halves and quarters, as the same keys swap it on a tiling one.
+// Up builds up to the whole work area, Down takes it back to its own box.
+bool COmarchyFloatingHyprBar::keySnap(char dir) {
+  const auto window = m_pWindow.lock();
+  if (!g_pOmarchyFloatingGlobalState->config.edgeSnap->value() || !validMapped(window) || !window->isFloating() || m_hidden ||
+      Fullscreen::controller()->isFullscreen(window))
+    return false;
+  const auto monitor = window->m_monitor.lock();
+  if (!monitor)
+    return false;
+
+  enum : uint8_t { STAY = 0xfe, RESTORE = 0xff };
+  const auto from = snappedZone();
+  uint8_t to = STAY;
+  switch (from) {
+    case SNAP_NONE: to = dir == 'l' ? SNAP_LEFT : dir == 'r' ? SNAP_RIGHT : dir == 'u' ? SNAP_TOP : STAY; break;
+    case SNAP_LEFT: to = dir == 'r' ? SNAP_RIGHT : dir == 'u' ? SNAP_TOP_LEFT : dir == 'd' ? SNAP_BOTTOM_LEFT : STAY; break;
+    case SNAP_RIGHT: to = dir == 'l' ? SNAP_LEFT : dir == 'u' ? SNAP_TOP_RIGHT : dir == 'd' ? SNAP_BOTTOM_RIGHT : STAY; break;
+    case SNAP_TOP_LEFT: to = dir == 'r' ? SNAP_TOP_RIGHT : dir == 'u' ? SNAP_TOP : dir == 'd' ? SNAP_LEFT : STAY; break;
+    case SNAP_TOP_RIGHT: to = dir == 'l' ? SNAP_TOP_LEFT : dir == 'u' ? SNAP_TOP : dir == 'd' ? SNAP_RIGHT : STAY; break;
+    case SNAP_BOTTOM_LEFT: to = dir == 'r' ? SNAP_BOTTOM_RIGHT : dir == 'u' ? SNAP_LEFT : dir == 'd' ? RESTORE : STAY; break;
+    case SNAP_BOTTOM_RIGHT: to = dir == 'l' ? SNAP_BOTTOM_LEFT : dir == 'u' ? SNAP_RIGHT : dir == 'd' ? RESTORE : STAY; break;
+    case SNAP_TOP: to = dir == 'l' ? SNAP_LEFT : dir == 'r' ? SNAP_RIGHT : dir == 'd' ? RESTORE : STAY; break;
+  }
+
+  if (to == STAY)
+    return true;
+  if (to == RESTORE) {
+    restoreSnapped();
+    return true;
+  }
+
+  const auto zone = static_cast<eSnapZone>(to);
+
+  makeRoom(zone, from, monitor);
+
+  CBox preview, target;
+  zoneBoxes(zone, monitor, preview, target);
+  snapTo(zone, target);
+  return true;
 }
 
 void COmarchyFloatingHyprBar::restoreSnappedSize(const Vector2D &cursor, double anchor, double offset) {
   const auto window = m_pWindow.lock();
-  if (!m_preSnapSize || !window)
+  const auto monitor = window ? window->m_monitor.lock() : nullptr;
+  if (!window || !monitor || snappedZone() == SNAP_NONE)
     return;
 
-  const auto size = *m_preSnapSize;
-  m_preSnapSize.reset();
+  const auto size = ownBox(monitor).size();
+  m_preSnapBox.reset();
 
-  // Resized or moved some other way since the snap: it is the window's own size now.
   auto box = window->layoutTarget()->position();
-  if (box.round() != m_snappedBox)
-    return;
 
   // Back to its own size under the pointer, holding the titlebar where it was
   // grabbed, as a maximized window does.

@@ -199,9 +199,16 @@ end
     original = client()
     width, height = 1280, 800
 
+    # The client takes a moment to accept a new size: wait until the box holds.
     def settled():
-      time.sleep(.6)
-      return client()
+      last = None
+      for _ in range(30):
+        time.sleep(.1)
+        now = client()
+        if last and now['at'] == last['at'] and now['size'] == last['size']:
+          return now
+        last = now
+      return last
 
     drag_to(1, 400)
     left = settled()
@@ -223,9 +230,8 @@ end
     capture('snap-top')
     print('PASS: titlebar drags snap to halves, quarters and the whole work area', flush=True)
 
-    out = drag_to(640, 300)
-    time.sleep(.3)
-    out = client()
+    drag_to(640, 300)
+    out = settled()
     assert out['size'] == original['size'], (original, out)
     print('PASS: dragging a snapped window out gives back its own size', flush=True)
 
@@ -234,6 +240,106 @@ end
     assert client()['size'] == original['size'], client()
     print('PASS: a drop away from the edges does not snap', flush=True)
     original = client()
+
+    # Keyboard: hl.plugin.hyprbars.snap(dir), what Super + Shift + arrow calls
+    # on a floating workspace. Left/Right between halves, Up builds up to the
+    # whole work area, Down takes it back to the window's own box.
+    def key(direction):
+      ctl('eval', f'hl.plugin.hyprbars.snap("{direction}")')
+      return settled()
+
+    before = client()
+    half = key('left')
+    assert half['at'][0] < 40 and width * .4 < half['size'][0] < width * .5 and half['size'][1] > height * .8, half
+    other = key('right')
+    assert other['at'][0] > width * .5 and other['size'] == half['size'], other
+    quarter = key('up')
+    assert other['at'][0] == quarter['at'][0] and height * .35 < quarter['size'][1] < height * .5, quarter
+    whole = key('up')
+    assert whole['size'][0] > width * .9 and whole['size'][1] > height * .8 and whole['fullscreen'] == 0, whole
+    back = key('down')
+    # Back to its own box, kept inside the work area (it may move in from an edge).
+    assert back['size'] == before['size'] and all(abs(back['at'][i] - before['at'][i]) <= 12 for i in (0, 1)), (before, back)
+    key('left'); key('down')
+    corner = client()
+    assert corner['at'][1] > height * .4 and height * .35 < corner['size'][1] < height * .5, corner
+    back = key('down')
+    # Back to its own box, kept inside the work area (it may move in from an edge).
+    assert back['size'] == before['size'] and all(abs(back['at'][i] - before['at'][i]) <= 12 for i in (0, 1)), (before, back)
+    still = key('down')
+    assert still['at'] == back['at'] and still['size'] == back['size'], still
+    print('PASS: keyboard snapping steps between halves, quarters and the work area, and Down gives back the window\'s own box', flush=True)
+
+    # A drag snap remembers the box from before the drag, not the one it was
+    # dropped with (hanging off the edge under the pointer): Down goes back there.
+    before = settled()
+    drag_to(1, 400)
+    snapped = settled()
+    assert snapped['at'][0] < 40 and snapped['size'][0] > width * .4, snapped
+    key('down')
+    back = key('down')
+    assert abs(back['size'][0] - before['size'][0]) <= 2 and abs(back['size'][1] - before['size'][1]) <= 2, (before, back)
+    assert back['at'][0] >= 0 and back['at'][0] + back['size'][0] <= width, back
+    print('PASS: after a drag snap, Down gives back the box from before the drag, on screen', flush=True)
+
+    # Two snapped windows: one moved into the other's tile trades places with
+    # it, and one moved into a quarter of the other's half shares that half.
+    second = subprocess.Popen(['foot', '--app-id=omarchy-titlebars-second', '--title=Second window', 'sleep', '60'], env=env, stdout=log, stderr=log)
+    for _ in range(60):
+      if len(json.loads(ctl('clients', '-j'))) == 2:
+        break
+      time.sleep(.1)
+    def win(app):
+      return next(c for c in json.loads(ctl('clients', '-j')) if c['class'] == app)
+    def focus(app):
+      ctl('dispatch', f'hl.dsp.focus({{ window = "address:{win(app)["address"]}" }})')
+      time.sleep(.2)
+    A, B = 'omarchy-titlebars-isolated-test', 'omarchy-titlebars-second'
+    focus(A); key('left')
+    focus(B); key('right')
+    capture('share-1-halves')
+    a, b = win(A), win(B)
+    assert a['at'][0] < 40 and b['at'][0] > width * .5 and a['size'] == b['size'], (a, b)
+    key('left')
+    a, b = win(A), win(B)
+    assert b['at'][0] < 40 and a['at'][0] > width * .5, (a, b)
+    capture('share-2-traded')
+    print('PASS: a window moved into a snapped window\'s tile trades places with it', flush=True)
+    key('right'); key('up')
+    capture('share-3-top-right')
+    key('left')
+    a, b = settled(), None
+    a, b = win(A), win(B)
+    capture('share-4-shared-half')
+    assert b['at'][0] < 40 and b['at'][1] < height * .2 and b['size'][1] < height * .5, b
+    assert a['at'][0] < 40 and a['at'][1] > height * .4 and a['size'][1] < height * .5, a
+    print('PASS: a window moved into a quarter of a snapped half shares it: the other takes the other quarter', flush=True)
+
+    # By drag too: B dragged by its titlebar onto A's half trades places with A.
+    for app in (A, B):
+      focus(app)
+      for _ in range(3):
+        key('down')
+    focus(A); key('left')
+    focus(B); key('right')
+    a, b = win(A), win(B)
+    assert a['at'][0] < 40 and b['at'][0] > width * .5 and a['size'] == b['size'], (a, b)
+    sx, sy = b['at'][0] + 150, b['at'][1] - 15
+    cmds = [f'move {sx} {sy}', 'wait 100', 'down', 'wait 120']
+    for i in range(1, 21):
+      cmds += [f'move {round(sx + (1 - sx) * i / 20)} {round(sy + (400 - sy) * i / 20)}', 'wait 20']
+    cmds += ['wait 100', 'up']
+    pointer(cmds)
+    settled()
+    a, b = win(A), win(B)
+    assert b['at'][0] < 40 and a['at'][0] > width * .5, (a, b)
+    capture('share-5-drag-traded')
+    print('PASS: a snapped window dragged onto another snapped window\'s tile trades places with it', flush=True)
+    second.terminate()
+    time.sleep(.5)
+    focus(A)
+    for _ in range(3):
+      key('down')
 
     window = client()
     x, y = window['at'][0] + 120, window['at'][1] - 15

@@ -7,6 +7,7 @@
 #include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
+#include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/config/shared/parserUtils/ParserUtils.hpp>
 #include <hyprland/src/render/Renderer.hpp>
@@ -140,6 +141,29 @@ int newOmarchyFloatingLuaButton(lua_State *L) {
   return 0;
 }
 
+// hl.plugin.hyprbars.snap("left" | "right" | "up" | "down"): step the focused
+// window between halves and quarters on a floating workspace. Returns false
+// when it does not apply (a tiled or fullscreen window, edge_snap off), so a
+// binding can fall back to its usual action.
+int omarchyFloatingLuaSnap(lua_State *L) {
+  const char *dir = luaL_checkstring(L, 1);
+  const char D = dir[0] == 'l' ? 'l' : dir[0] == 'r' ? 'r' : dir[0] == 'u' ? 'u' : dir[0] == 'd' ? 'd' : 0;
+  bool handled = false;
+  const auto window = Desktop::focusState()->window();
+  if (D && window) {
+    // Decorations own their bars, so these weak pointers are only read, never locked.
+    for (const auto &weak : g_pOmarchyFloatingGlobalState->bars) {
+      const auto bar = weak.get();
+      if (bar && bar->getOwner() == window) {
+        handled = bar->keySnap(D);
+        break;
+      }
+    }
+  }
+  lua_pushboolean(L, handled);
+  return 1;
+}
+
 static PLUGIN_DESCRIPTION_INFO initializeOmarchyFloating(HANDLE handle) {
   OMARCHY_FLOATING_PHANDLE = handle;
 
@@ -229,6 +253,7 @@ static PLUGIN_DESCRIPTION_INFO initializeOmarchyFloating(HANDLE handle) {
   HyprlandAPI::addConfigValueV2(OMARCHY_FLOATING_PHANDLE, g_pOmarchyFloatingGlobalState->config.onDoubleClick);
 
   HyprlandAPI::addLuaFunction(OMARCHY_FLOATING_PHANDLE, "hyprbars", "add_button", ::newOmarchyFloatingLuaButton);
+  HyprlandAPI::addLuaFunction(OMARCHY_FLOATING_PHANDLE, "hyprbars", "snap", ::omarchyFloatingLuaSnap);
   static auto P4 = Event::bus()->m_events.config.preReload.listen([&] { onPreConfigReload(); });
   static auto P5 = Event::bus()->m_events.config.reloaded.listen([&] { onConfigReloaded(); });
 

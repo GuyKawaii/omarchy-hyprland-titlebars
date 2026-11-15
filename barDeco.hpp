@@ -50,6 +50,8 @@ public:
   PHLWINDOW getOwner();
 
   void updateRules();
+  // Super + Shift + arrow on a floating workspace; false when it does not apply.
+  bool keySnap(char dir);
   void onConfigReloaded();
 
   WP<COmarchyFloatingHyprBar> m_self;
@@ -140,10 +142,19 @@ private:
   // and the window box it gets on release.
   CBox m_snapPreview;
   CBox m_snapTarget;
-  // The size before the last snap, given back when the window is dragged out of
-  // the box it was snapped to.
-  std::optional<Vector2D> m_preSnapSize;
-  CBox m_snappedBox;
+  // The box before the first snap, given back when the window is dragged out of
+  // the box it was snapped to (its size) or taken back by key (box and place).
+  std::optional<CBox> m_preSnapBox;
+  // Where the current titlebar drag started: the tile it left and its own box.
+  eSnapZone m_dragFromZone = SNAP_NONE;
+  CBox m_dragFromBox;
+
+  void zoneBoxes(eSnapZone zone, PHLMONITOR monitor, CBox &preview, CBox &target);
+  eSnapZone snappedZone();
+  void snapTo(eSnapZone zone, const CBox &target);
+  void restoreSnapped();
+  CBox ownBox(PHLMONITOR monitor);
+  void makeRoom(eSnapZone zone, eSnapZone from, PHLMONITOR monitor);
 
   void updateSnap();
   void clearSnap();

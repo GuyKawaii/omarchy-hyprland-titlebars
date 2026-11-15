@@ -27,6 +27,22 @@ These are in addition to the upstream `plugin.hyprbars` titlebar settings.
 | `workspace_tag` | empty | When set, titlebars apply only to floating windows with this tag. Removing the tag or tiling the window immediately releases titlebar space. |
 | `edge_snap` | true | Let go of a titlebar drag with the pointer at the left or right screen edge to fill that half of the work area, in a corner for that quarter, or at the top for all of it. A faint wash in the active border colour shows where the window will land. Dragging a snapped window out gives back its own size. |
 
+## Snapping by keyboard
+
+`hl.plugin.hyprbars.snap(dir)`, with `dir` one of `"left"`, `"right"`, `"up"` or `"down"`, steps the focused floating window through the same tiles a titlebar drag snaps to: Left and Right move between halves, Up goes from a half to its top quarter and then to the whole work area, and Down goes back down to the window's own box from before it was snapped. A window moved into another snapped window's tile trades places with it, and one moved into a quarter of another's half pushes that window into the other quarter. It returns `false` when it does not apply (no titlebar, a tiled or fullscreen window, or `edge_snap` off), so a binding can fall back to its usual action:
+
+```lua
+for key, dir in pairs({ LEFT = "l", RIGHT = "r", UP = "u", DOWN = "d" }) do
+  hl.unbind("SUPER + SHIFT + " .. key)
+  hl.bind("SUPER + SHIFT + " .. key, function()
+    local bars = hl.plugin.hyprbars
+    if not (bars and bars.snap and bars.snap(({ l = "left", r = "right", u = "up", d = "down" })[dir])) then
+      hl.dispatch(hl.dsp.window.swap({ direction = dir }))
+    end
+  end)
+end
+```
+
 ## Titles
 
 A titlebar shows the name of the app the window belongs to, when a desktop entry claims the window's class through `StartupWMClass` or its file name, and the window's own title otherwise. A web app titles its window with its page or just its domain, so this is what keeps `web.whatsapp.com` reading WhatsApp. Entries are read from `$XDG_DATA_HOME/applications` and then `$XDG_DATA_DIRS`, so a user's own entry wins, and an entry added while Hyprland runs is picked up within a couple of seconds.
@@ -75,6 +91,6 @@ To release, make a GitHub release tagged `vX.Y.Z` with notes on what changed. om
 python3 tools/verify.py build/titlebars.so
 ```
 
-The verifier needs a running Hyprland session with exactly one Hyprland instance, plus `foot`, `grim`, `wayland-scanner`, and a C compiler. It starts a disposable nested Hyprland with its own runtime directory and never loads the candidate library into the parent compositor. It checks repeated load/reload/unload, interleaved with the Windows XP fork when `/usr/lib/omarchy-windows-xp/hyprbars.so` is installed, and that a loaded plugin the config no longer configures reserves no titlebar space. It then exercises real pointer titlebar dragging to the screen edges with `edge_snap` off, without snapping or losing the titlebar off the top, and with it on, snapping to halves, quarters and the whole work area and giving back the window's size when it is dragged out, double-click maximize, and restoring a maximized window by dragging its titlebar. A two-window regression check deliberately delays button and double-click commands and changes focus before they run, to verify that actions keep the clicked window as their target. A final check confirms that `workspace_tag`-scoped titlebars release their space immediately when a window is tiled or untagged.
+The verifier needs a running Hyprland session with exactly one Hyprland instance, plus `foot`, `grim`, `wayland-scanner`, and a C compiler. It starts a disposable nested Hyprland with its own runtime directory and never loads the candidate library into the parent compositor. It checks repeated load/reload/unload, interleaved with the Windows XP fork when `/usr/lib/omarchy-windows-xp/hyprbars.so` is installed, and that a loaded plugin the config no longer configures reserves no titlebar space. It then exercises real pointer titlebar dragging to the screen edges with `edge_snap` off, without snapping or losing the titlebar off the top, and with it on, snapping to halves, quarters and the whole work area and giving back the window's size when it is dragged out, keyboard snapping, and two snapped windows trading or sharing tiles by key and by drag, double-click maximize, and restoring a maximized window by dragging its titlebar. A two-window regression check deliberately delays button and double-click commands and changes focus before they run, to verify that actions keep the clicked window as their target. A final check confirms that `workspace_tag`-scoped titlebars release their space immediately when a window is tiled or untagged.
 
 Screenshots and logs go to `/tmp/omarchy-hyprland-titlebars-verification` by default; pass `--artifacts DIR` to change it.
